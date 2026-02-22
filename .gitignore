@@ -1,0 +1,23 @@
+# Dependencies
+node_modules/
+
+# Environment variables (SECRETS - NEVER COMMIT)
+.env
+
+# Log files
+*.log
+discovery_history.log
+
+# OS files
+Thumbs.db
+.DS_Store
+
+# IDE
+.vscode/
+.idea/
+
+# Debug files
+debug*.log
+error_trace.log
+final.log
+output.log

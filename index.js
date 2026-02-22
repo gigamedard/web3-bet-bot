@@ -27,6 +27,25 @@ const OVERTIME_COMMISSION = 0.03;
 
 const fs = require('fs');
 
+// ── ANSI Color Helpers ──────────────────────────────────────
+const C = {
+    reset: '\x1b[0m',
+    bold: '\x1b[1m',
+    dim: '\x1b[2m',
+    green: '\x1b[32m',
+    yellow: '\x1b[33m',
+    blue: '\x1b[34m',
+    magenta: '\x1b[35m',
+    cyan: '\x1b[36m',
+    red: '\x1b[31m',
+    white: '\x1b[97m',
+    bgGreen: '\x1b[42m',
+    bgRed: '\x1b[41m',
+    bgYellow: '\x1b[43m',
+    bgBlue: '\x1b[44m',
+    bgMagenta: '\x1b[45m',
+};
+
 // Interval definitions
 const DISCOVERY_INTERVAL_MS = 30000; // 30 seconds
 const CLAIM_INTERVAL_MS = 60000; // 1 minute
@@ -35,6 +54,7 @@ const CLAIM_INTERVAL_MS = 60000; // 1 minute
 let isDiscoveryRunning = false;
 let previousAzuroIds = new Set();
 let previousOvertimeIds = new Set();
+const placedBets = new Set(); // Tracks match IDs already bet on to avoid duplicates
 
 // Initialize Fetchers and Oracle Once
 const azuroFetcher = new AzuroFetcher(AZURO_SUBGRAPH_URL, process.env.POLYGON_WS_URL);
@@ -51,13 +71,13 @@ async function runDiscoveryCycle() {
     }
     isDiscoveryRunning = true;
 
-    logger.debug("=========================================");
-    logger.debug("🚀 Starting Web3-Arb-Sentry Discovery Cycle 🚀");
-    logger.debug("=========================================");
+    logger.debug(`${C.dim}═══════════════════════════════════════════${C.reset}`);
+    logger.debug(`${C.dim}🔄 Discovery Cycle Tick${C.reset}`);
+    logger.debug(`${C.dim}═══════════════════════════════════════════${C.reset}`);
 
     try {
         // --- PHASE 1: DISCOVERY (Subgraphs & API) ---
-        logger.debug("[PHASE 1] Subgraph Discovery: Scanning for events...");
+        logger.debug(`${C.cyan}📡 [PHASE 1]${C.reset} Subgraph Discovery: Scanning for events...`);
         const [azuroData, overtimeData] = await Promise.all([
             azuroFetcher.fetchActiveEvents(),
             overtimeFetcher.fetchActiveEvents() // Phase 1: Thales API Discovery
@@ -72,8 +92,8 @@ async function runDiscoveryCycle() {
         const azuroNames = azuroData.map(e => e.name);
         const overtimeNames = overtimeData.map(e => e.name);
 
-        const azuroListStr = `Azuro (${azuroData.length}):\n` + azuroData.map(e => `  - ${e.name} | Odds: [${(e.odds || []).join(', ')}]`).join('\n');
-        const overtimeListStr = `Overtime (${overtimeData.length}):\n` + overtimeData.map(e => `  - ${e.name} | Odds: [${(e.odds || []).join(', ')}]`).join('\n');
+        const azuroListStr = `${C.magenta}${C.bold}🅰️  Azuro (${azuroData.length})${C.reset}\n` + azuroData.map(e => `  ${C.dim}├─${C.reset} ${C.white}${e.name}${C.reset} ${C.cyan}[${(e.odds || []).join(', ')}]${C.reset}`).join('\n');
+        const overtimeListStr = `${C.blue}${C.bold}🅾️  Overtime (${overtimeData.length})${C.reset}\n` + overtimeData.map(e => `  ${C.dim}├─${C.reset} ${C.white}${e.name}${C.reset} ${C.cyan}[${(e.odds || []).join(', ')}]${C.reset}`).join('\n');
 
         if (isAzuroIdentical && isOvertimeIdentical && (azuroData.length > 0 || overtimeData.length > 0)) {
             // Log quietly to file instead of spamming terminal
@@ -93,10 +113,10 @@ async function runDiscoveryCycle() {
                 logger.error(`[FS Logs Error] ${fsError.message}`);
             }
 
-            logger.debug(`[Discovery] Events are identical to last cycle. Logged quietly to discovery_history.log (Rotated max 10 blocks).`);
+            logger.debug(`${C.dim}💤 [Discovery] No change from last cycle. Logged to file.${C.reset}`);
         } else {
             // New events discovered, log them directly to the console
-            logger.info(`--- New Events Discovered ---`);
+            logger.info(`\n${C.bgBlue}${C.white}${C.bold} 🆕  NEW EVENTS DISCOVERED ${C.reset}`);
             logger.info(azuroListStr);
             logger.info(overtimeListStr);
 
@@ -106,9 +126,9 @@ async function runDiscoveryCycle() {
 
         const matchedPairs = hydrateDictionaryByCompositeKey(azuroData, overtimeData);
         if (matchedPairs.length > 0) {
-            logger.info(`Found ${matchedPairs.length} matched pairs out of ${azuroData.length} Azuro markets!`);
+            logger.info(`${C.green}${C.bold}🔗 Found ${matchedPairs.length} matched pair(s)${C.reset} out of ${azuroData.length} Azuro markets!`);
         } else {
-            logger.debug(`Found ${matchedPairs.length} matched pairs out of ${azuroData.length} Azuro markets!`);
+            logger.debug(`${C.dim}🔗 0 matched pairs out of ${azuroData.length} Azuro markets${C.reset}`);
         }
 
         // --- PHASE 2: REAL-TIME ARBITRAGE (Smart Contracts) ---
@@ -116,13 +136,20 @@ async function runDiscoveryCycle() {
             // Dynamic Gas Fetching via Oracle
             const avgPolygonGas = await gasOracle.getGasCostInUsd('polygon');
             const avgArbitrumGas = await gasOracle.getGasCostInUsd('arbitrum') || 0.10; // Arbitrum fallback
-            logger.info(`[Oracle] Live Gas estimated: Polygon $${avgPolygonGas.toFixed(2)} | Arbitrum $${avgArbitrumGas.toFixed(2)}`);
+            logger.info(`${C.yellow}⛽ [Gas Oracle]${C.reset} Polygon ${C.green}$${avgPolygonGas.toFixed(2)}${C.reset} | Arbitrum ${C.green}$${avgArbitrumGas.toFixed(2)}${C.reset}`);
 
             for (const pair of matchedPairs) {
                 const subAz = pair.eventA;
                 const subOv = pair.eventB;
 
-                logger.info(`Validating Arbitrage window for [${subAz.name}] directly on-chain...`);
+                // ── BET DEDUPLICATION: Skip if already placed ──
+                const betKey = `${subAz.id}_${subOv.id}`;
+                if (placedBets.has(betKey)) {
+                    logger.debug(`${C.dim}⏭️  Skipping [${subAz.name}] — bet already placed in a previous cycle.${C.reset}`);
+                    continue;
+                }
+
+                logger.info(`${C.cyan}🔍 Validating${C.reset} [${C.bold}${subAz.name}${C.reset}] on-chain...`);
                 let liveAzuro = { isFrozen: false, odds: subAz.odds };
                 let liveOvertime = { isFrozen: false, odds: subOv.odds };
 
@@ -159,11 +186,16 @@ async function runDiscoveryCycle() {
                 if (result.isArbitrage) {
                     // Attach the specific matchId to the payload
                     result.matchId = subAz.id;
-                    logger.info(`🚨 SUREBET DETECTED! Net Profit: ${result.profitPercentage.toFixed(2)}% | Amount: $${result.minNetProfit.toFixed(2)} 🚨`);
-                    logger.info(`Action: Triggering Safe ExecutionEngine checks...`);
+                    logger.info(`\n${C.bgGreen}${C.white}${C.bold} 🚨  SUREBET DETECTED  🚨 ${C.reset}`);
+                    logger.info(`${C.green}${C.bold}💰 Net Profit: ${result.profitPercentage.toFixed(2)}% | Amount: $${result.minNetProfit.toFixed(2)}${C.reset}`);
+                    logger.info(`${C.yellow}⚡ Triggering ExecutionEngine...${C.reset}`);
 
                     // Fire the Execution Engine to broadcast trades
                     await require('./src/engine/ExecutionEngine').evaluateAndExecute(result);
+
+                    // ── Mark this bet as placed to avoid duplicates ──
+                    placedBets.add(betKey);
+                    logger.info(`${C.dim}📝 Bet registered in dedup cache (${placedBets.size} total placed bets)${C.reset}`);
                 }
             }
         }
@@ -173,7 +205,7 @@ async function runDiscoveryCycle() {
         if (e.stack) logger.error(e.stack);
     } finally {
         isDiscoveryRunning = false;
-        logger.debug(`[Main Loop] Discovery Cycle complete. Sleeping for ${DISCOVERY_INTERVAL_MS / 1000} seconds...`);
+        logger.debug(`${C.dim}😴 Sleeping ${DISCOVERY_INTERVAL_MS / 1000}s until next cycle... (${placedBets.size} bets placed so far)${C.reset}`);
     }
 }
 
@@ -181,9 +213,10 @@ async function runDiscoveryCycle() {
 // INITIALIZATION SEQUENCE
 // ---------------------------------------------------------
 
-logger.info("=========================================");
-logger.info("🤖 Starting Web3-Arb-Sentry Background Daemon 🤖");
-logger.info("=========================================");
+logger.info(`${C.bgMagenta}${C.white}${C.bold}                                              ${C.reset}`);
+logger.info(`${C.bgMagenta}${C.white}${C.bold}   🤖  Web3-Arb-Sentry   ·   PRODUCTION MODE   ${C.reset}`);
+logger.info(`${C.bgMagenta}${C.white}${C.bold}                                              ${C.reset}`);
+logger.info(`${C.cyan}📊 Investment: ${C.bold}$${TOTAL_INVESTMENT}${C.reset} ${C.dim}|${C.reset} ${C.cyan}🔄 Interval: ${C.bold}${DISCOVERY_INTERVAL_MS / 1000}s${C.reset} ${C.dim}|${C.reset} ${C.cyan}🎯 Dedup: ${C.green}ON${C.reset}`);
 
 // 1. Trigger the very first Discovery loop instantly
 runDiscoveryCycle();
@@ -193,7 +226,7 @@ setInterval(runDiscoveryCycle, DISCOVERY_INTERVAL_MS);
 
 // 3. Schedule infinite Claim Engine polling every 1 minute
 if (process.env.AUTO_CLAIM === 'true') {
-    logger.info("[Main Loop] Starting background ClaimEngine resolution polling...");
+    logger.info(`${C.green}✅ ClaimEngine${C.reset} auto-claim polling started (every ${CLAIM_INTERVAL_MS / 1000}s)`);
     setInterval(async () => {
         try {
             const claimEngine = require('./src/engine/ClaimEngine');
@@ -203,5 +236,5 @@ if (process.env.AUTO_CLAIM === 'true') {
         }
     }, CLAIM_INTERVAL_MS);
 } else {
-    logger.warn("[Main Loop] AUTO_CLAIM is disabled in .env. The bot will NOT attempt to cash out winning bets.");
+    logger.warn(`${C.yellow}⚠️  AUTO_CLAIM is disabled${C.reset} — the bot will NOT auto-cash winning bets.`);
 }
